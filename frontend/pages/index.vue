@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useChat } from "@/composables/useChat";
-import { Trash2 } from "lucide-vue-next";
+import { MessageSquarePlus, Trash2 } from "lucide-vue-next";
 
 const {
   messages,
@@ -9,9 +9,9 @@ const {
   error,
   currentCitations,
   selectedCitation,
-  filters,
   submit,
   clear,
+  startNewConversation,
   selectCitation,
   openInObsidian,
 } = useChat();
@@ -48,14 +48,22 @@ function handleMessageClick(message: typeof messages.value[number]) {
   <div class="flex-1 flex overflow-hidden">
     <!-- Chat area -->
     <div class="flex-1 flex flex-col min-w-0">
-      <!-- Clear button -->
-      <div v-if="messages.length > 0" class="flex justify-end p-2 border-b">
+      <!-- Toolbar -->
+      <div class="flex justify-end gap-2 p-2 border-b">
         <button
+          class="inline-flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground rounded hover:bg-muted transition-colors"
+          @click="startNewConversation"
+        >
+          <MessageSquarePlus class="h-3 w-3" />
+          新对话
+        </button>
+        <button
+          v-if="messages.length > 0"
           class="inline-flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground rounded hover:bg-muted transition-colors"
           @click="clear"
         >
           <Trash2 class="h-3 w-3" />
-          清空对话
+          清空当前页
         </button>
       </div>
 
