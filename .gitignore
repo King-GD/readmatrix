@@ -74,6 +74,7 @@ chroma_data/
 
 # ===== Misc =====
 .serena/
+CLAUDE.md
 .claude/
 *.bak
 *.tmp
