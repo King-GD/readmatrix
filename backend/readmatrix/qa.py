@@ -1,4 +1,4 @@
-"""QA Engine - RAG pipeline with grounded citations and conversation memory"""
+﻿"""QA Engine - RAG pipeline with grounded citations and conversation memory."""
 
 from __future__ import annotations
 
@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
 from .config import get_settings
-from .conversation import ContextAssembler, ConversationMessage, ConversationService
+from .conversation import (
+    ContextAssembler,
+    ConversationMessage,
+    ConversationService,
+    DebateState,
+)
 from .models import Citation
 from .retriever import Retriever
 
@@ -14,23 +19,20 @@ from .retriever import Retriever
 QA_PROMPT = """你是一位深度阅读助手，帮助用户基于他们的读书笔记回答问题。
 
 【你的任务】
-1. 先理解用户问题的核心意图
-2. 分析提供的笔记内容，找出与问题相关的关键信息
-3. 结合会话上下文，将多条观点进行整合、对比、归纳
-4. 给出有深度、有结构的回答
+1. 理解用户问题的核心意图。
+2. 分析笔记中与问题相关的关键信息。
+3. 结合会话上下文，完成对比、整合与归纳。
+4. 给出有结构、可解释的回答。
 
 【笔记使用比例】
-请将笔记内容的占比控制在约 {note_ratio}%。
-- 0%：完全基于你的理解回答
-- 100%：严格只使用笔记内容
+请将笔记内容占比控制在约 {note_ratio}% 。
 
 【回答要求】
-1. 不要简单罗列笔记内容，要进行深度分析和整合
-2. 对话中出现代词（他/它/这/那）且指代不清时，先提出澄清问题
-3. 使用 [1][2] 等标记引用来源，引用必须出现在正文中
-4. 可以补充你的理解，但要与笔记观点一致，不得编造
-5. 回答要有结构：先给出核心观点，再展开分析
-6. 当占比 > 0 且笔记中没有相关信息时，回答"根据你的笔记，我没有找到相关信息。"
+1. 不要简单罗列笔记内容，要做分析和整合。
+2. 对话中出现“它/这/那”等指代不清时，先提出澄清问题。
+3. 使用 [1][2] 等引用标记，并确保出现在正文里。
+4. 可补充你的理解，但不得编造与笔记冲突的事实。
+5. 当占比 > 0 且笔记无相关信息时，回答“根据你的笔记，我没有找到相关信息。”
 
 【会话摘要】
 {conversation_summary}
@@ -38,7 +40,7 @@ QA_PROMPT = """你是一位深度阅读助手，帮助用户基于他们的读�
 【最近对话】
 {recent_dialogue}
 
-【用户的笔记】
+【用户笔记】
 {note_context}
 
 【当前问题】
@@ -46,11 +48,10 @@ QA_PROMPT = """你是一位深度阅读助手，帮助用户基于他们的读�
 
 【回答】"""
 
-
 AMBIGUOUS_REFERENCES = (
+    "它",
     "他",
     "她",
-    "它",
     "这",
     "那",
     "这个",
@@ -75,30 +76,98 @@ EXPLICIT_SUBJECT_HINTS = (
     "上一个回答",
 )
 
+DEBATE_END_COMMANDS = ("结束", "结束辩论", "停止辩论")
+
+DEBATE_PROMPT = """你正在与用户进行读书辩论，请你明确站在用户立场的对立面进行回应。
+
+【辩题】
+{topic}
+
+【用户立场】
+{user_stance}
+
+【你的立场要求】
+你必须站在用户立场的对立面，给出有证据支持的反驳或补充观点。
+
+【证据规则】
+1. 优先使用用户笔记中的证据，并在正文中使用 [1][2] 这类引用编号。
+2. 允许补充通用知识；凡是非笔记内容，必须在对应句末添加【非笔记依据】。
+3. 不允许把通用知识伪装成笔记证据。
+4. 回答末尾必须增加“非笔记依据”小节，列出本次使用的非笔记依据要点；若没有则写“无”。
+
+【输出风格】
+1. 逻辑清晰、语气克制，不做人身攻击。
+2. 先给核心反驳观点，再给展开论证。
+3. 尽量结合会话历史避免重复。
+
+【会话摘要】
+{conversation_summary}
+
+【最近对话】
+{recent_dialogue}
+
+【用户笔记】
+{note_context}
+
+【用户本轮发言】
+{question}
+
+【回答】"""
+
+DEBATE_SUMMARY_PROMPT = """你是这场读书辩论的主持人。请根据辩论记录输出总结。
+
+【辩题】
+{topic}
+
+【用户立场】
+{user_stance}
+
+【是否判胜负】
+{judge_mode}
+
+【辩论记录】
+{history}
+
+【输出要求】
+1. 默认输出中立总结。
+2. 如果“是否判胜负”为 winner，则增加“胜负判断”小节，给出胜方和理由。
+3. 总结必须包含以下小节：
+   - 双方核心论点
+   - 共识与分歧
+   - 证据质量点评（区分笔记依据与非笔记依据）
+   - 下一步可验证问题
+4. 不要编造不存在的论点或证据。
+"""
+
 
 @dataclass
 class PreparedContext:
-    """预处理后的上下文，供 ask/ask_stream 共用。"""
+    """Preprocessed context shared by ask/ask_stream flows."""
 
     prompt: str
     citations: list[Citation]
     has_chunks: bool
     note_context: str
+    conversation_summary: str
+    recent_dialogue: str
 
 
 @dataclass
 class AskResult:
-    """会话问答结果，覆盖普通回答与澄清场景。"""
+    """Conversation ask result for normal and clarification/debate cases."""
 
     answer: str
     citations: list[Citation]
     conversation_id: str
     needs_clarification: bool = False
     clarification_question: str | None = None
+    mode: str = "qa"
+    debate_status: str | None = None
+    debate_event: str | None = None
 
 
 class QAEngine:
-    """Question-answering engine with grounded citations"""
+    """Question-answering engine with grounded citations."""
 
     def __init__(
         self,
@@ -113,12 +182,11 @@ class QAEngine:
 
     @property
     def client(self):
-        """Lazy-load LLM client based on provider"""
+        """Lazy-load LLM client based on provider."""
         if self._client is None:
             import openai
 
             settings = get_settings()
-
             if settings.llm_provider == "siliconflow":
                 self._client = openai.OpenAI(
                     api_key=settings.siliconflow_api_key,
@@ -137,7 +205,7 @@ class QAEngine:
         recent_dialogue: str,
         note_context: str,
     ) -> str:
-        """根据配置生成提示词。"""
+        """Build QA prompt with runtime sections."""
         safe_ratio = max(0, min(100, note_ratio))
         return QA_PROMPT.format(
             question=question,
@@ -148,18 +216,14 @@ class QAEngine:
         )
 
     def _rewrite_query(self, original_query: str) -> list[str]:
-        """
-        将用户问题改写为更适合检索的查询。
-        返回 2-3 个更具体的搜索查询，提高检索召回率。
-        """
+        """Rewrite user question into 2-3 retrieval-friendly queries."""
         settings = get_settings()
-
         prompt = f"""将以下问题改写为 2-3 个更具体的搜索查询，用于在读书笔记中检索相关内容。
 
 要求：
-1. 提取问题中的核心概念和关键词
-2. 考虑同义词和相关表达
-3. 每行输出一个查询，不要编号
+1. 提取核心概念和关键词
+2. 覆盖常见同义表达
+3. 每行一个查询，不要编号
 
 问题：{original_query}
 
@@ -172,9 +236,8 @@ class QAEngine:
                 temperature=0.3,
                 max_tokens=200,
             )
-
-            queries = response.choices[0].message.content.strip().split("\n")
-            queries = [q.strip().lstrip("0123456789.-、) ") for q in queries if q.strip()]
+            text = response.choices[0].message.content or ""
+            queries = [q.strip().lstrip("0123456789.-、 ") for q in text.split("\n") if q.strip()]
             if original_query not in queries:
                 queries.insert(0, original_query)
             return queries[:3]
@@ -189,11 +252,8 @@ class QAEngine:
         summary: str = "",
         recent_messages: list[ConversationMessage] | None = None,
     ) -> PreparedContext:
-        """
-        统一的上下文准备逻辑：查询改写 + 检索 + 组装上下文 + 构建 Prompt。
-        """
+        """Prepare retrieval context, citations, and final QA prompt."""
         settings = get_settings()
-
         queries = self._rewrite_query(query)
 
         all_chunks = []
@@ -215,7 +275,6 @@ class QAEngine:
 
         context_parts = []
         citations: list[Citation] = []
-
         for i, chunk in enumerate(chunks, 1):
             citation = Citation.from_chunk(chunk, i)
             citations.append(citation)
@@ -246,28 +305,24 @@ class QAEngine:
             citations=citations,
             has_chunks=bool(chunks),
             note_context=note_context,
+            conversation_summary=sections["conversation_summary"],
+            recent_dialogue=sections["recent_dialogue"],
         )
 
     def _contains_ambiguous_reference(self, query: str) -> bool:
-        """判断问题中是否包含潜在指代词。"""
         text = query.strip()
         if not text:
             return False
         return any(token in text for token in AMBIGUOUS_REFERENCES)
 
     def _has_explicit_subject(self, query: str) -> bool:
-        """判断问题是否显式给出了主语，避免误触发澄清。"""
         text = query.strip()
         if any(token in text for token in EXPLICIT_SUBJECT_HINTS):
             return True
-
-        # 若包含中文引号或英文引号中的实体，认为主语较明确
         if "“" in text and "”" in text:
             return True
         if '"' in text:
             return True
-
-        # 句长较长且包含明显描述词时，通常信息已足够
         return len(text) >= 20
 
     def _rule_based_clarification(
@@ -275,7 +330,6 @@ class QAEngine:
         query: str,
         recent_messages: list[ConversationMessage],
     ) -> bool:
-        """基于规则判断是否需要澄清。"""
         if not self._contains_ambiguous_reference(query):
             return False
         if self._has_explicit_subject(query):
@@ -289,7 +343,6 @@ class QAEngine:
         query: str,
         recent_messages: list[ConversationMessage],
     ) -> bool:
-        """使用小模型判定是否应先澄清，失败时回退规则结果。"""
         settings = get_settings()
         history_lines = []
         for item in recent_messages[-6:]:
@@ -299,8 +352,8 @@ class QAEngine:
 
         prompt = f"""你是对话澄清分类器。
 
-任务：判断“当前问题”在“历史对话”下是否指代不清，是否需要先追问澄清。
-输出要求：仅输出 YES 或 NO。
+任务：判断“当前问题”在“历史对话”下是否指代不清、是否需要先追问澄清。
+只输出 YES 或 NO。
 
 历史对话：
 {history_text}
@@ -326,7 +379,6 @@ class QAEngine:
         query: str,
         recent_messages: list[ConversationMessage],
     ) -> bool:
-        """组合规则与模型判定，决定是否进入澄清流程。"""
         if not self._rule_based_clarification(query, recent_messages):
             return False
         return self._llm_based_clarification(query, recent_messages)
@@ -336,7 +388,6 @@ class QAEngine:
         query: str,
         recent_messages: list[ConversationMessage],
     ) -> str:
-        """构建澄清追问语句。"""
         if recent_messages:
             recent_hint = recent_messages[-1].content.strip().replace("\n", " ")[:48]
             if recent_hint:
@@ -351,7 +402,6 @@ class QAEngine:
         previous_summary: str,
         history: list[ConversationMessage],
     ) -> str:
-        """基于最近对话生成摘要，失败时返回旧摘要。"""
         settings = get_settings()
         history_lines = []
         for item in history[-16:]:
@@ -388,7 +438,6 @@ class QAEngine:
             return previous_summary
 
     def _call_llm_answer(self, prompt: str) -> str:
-        """调用模型生成完整回答。"""
         settings = get_settings()
         response = self.client.chat.completions.create(
             model=settings.llm_model,
@@ -397,13 +446,107 @@ class QAEngine:
         )
         return response.choices[0].message.content or ""
 
+    def _is_debate_end_command(self, query: str) -> bool:
+        return query.strip() in DEBATE_END_COMMANDS
+
+    def _normalize_debate_config(self, debate: dict | None) -> dict:
+        payload = debate or {}
+        topic = str(payload.get("topic") or "").strip()
+        user_stance = str(payload.get("user_stance") or "").strip()
+        judge_mode = str(payload.get("judge_mode") or "none").strip().lower()
+        if judge_mode not in {"none", "winner"}:
+            judge_mode = "none"
+        return {
+            "topic": topic,
+            "user_stance": user_stance,
+            "judge_mode": judge_mode,
+        }
+
+    def _ensure_active_debate_state(self, conversation_id: str, debate: dict) -> dict | None:
+        latest_state = self.conversation_service.get_latest_debate_state(conversation_id)
+        changed = (
+            not latest_state
+            or latest_state.get("topic") != debate["topic"]
+            or latest_state.get("user_stance") != debate["user_stance"]
+            or latest_state.get("judge_mode") != debate["judge_mode"]
+            or latest_state.get("status") != "active"
+        )
+        if changed:
+            self.conversation_service.save_debate_state(
+                conversation_id=conversation_id,
+                state=DebateState(
+                    topic=debate["topic"],
+                    user_stance=debate["user_stance"],
+                    judge_mode=debate["judge_mode"],
+                    status="active",
+                ),
+            )
+            latest_state = self.conversation_service.get_latest_debate_state(conversation_id)
+        return latest_state
+
+    def _build_debate_turn_prompt(self, query: str, debate: dict, ctx: PreparedContext) -> str:
+        note_context = ctx.note_context.strip() if ctx.note_context else "（未检索到相关笔记片段）"
+        return DEBATE_PROMPT.format(
+            topic=debate["topic"],
+            user_stance=debate["user_stance"],
+            conversation_summary=ctx.conversation_summary,
+            recent_dialogue=ctx.recent_dialogue,
+            note_context=note_context,
+            question=query,
+        )
+
+    def _collect_debate_history(
+        self,
+        conversation_id: str,
+        state_created_at: str | None,
+    ) -> list[ConversationMessage]:
+        if state_created_at:
+            return self.conversation_service.list_messages_since(
+                conversation_id=conversation_id,
+                since_created_at=state_created_at,
+                limit=200,
+                include_system=False,
+            )
+        return self.conversation_service.list_messages(
+            conversation_id=conversation_id,
+            limit=200,
+            offset=0,
+            include_system=False,
+        )
+
+    def _build_debate_summary_prompt(self, debate: dict, history: list[ConversationMessage]) -> str:
+        history_lines: list[str] = []
+        for item in history:
+            if item.role not in {"user", "assistant"}:
+                continue
+            role = "用户" if item.role == "user" else "助手"
+            text = item.content.strip()
+            if not text:
+                continue
+            history_lines.append(f"{role}: {text}")
+
+        history_text = "\n".join(history_lines) or "（无有效辩论记录）"
+        return DEBATE_SUMMARY_PROMPT.format(
+            topic=debate["topic"],
+            user_stance=debate["user_stance"],
+            judge_mode=debate["judge_mode"],
+            history=history_text,
+        )
+
+    def _ensure_non_note_section(self, answer: str) -> str:
+        """Ensure debate answer always contains a non-note evidence section."""
+        text = answer.strip()
+        if "非笔记依据" in text:
+            return text
+        return f"{text}\n\n非笔记依据：\n- 无"
+
     def ask(
         self,
         query: str,
         book_id: Optional[str] = None,
         book_title: Optional[str] = None,
     ) -> tuple[str, list[Citation]]:
-        """保留旧接口：单轮问答。"""
+        """Legacy single-turn entrypoint."""
         settings = get_settings()
         ctx = self._prepare_context(query, book_id, book_title)
 
@@ -420,10 +563,88 @@ class QAEngine:
         book_title: Optional[str] = None,
         conversation_id: str | None = None,
         use_context: bool = True,
+        mode: str = "qa",
+        debate: dict | None = None,
     ) -> AskResult:
-        """会话问答入口：支持混合记忆与澄清。"""
+        """Conversation entrypoint for QA mode and debate mode."""
         settings = get_settings()
         conv_id = self.conversation_service.ensure_conversation(conversation_id)
+
+        if mode == "debate":
+            debate_cfg = self._normalize_debate_config(debate)
+            if not debate_cfg["topic"] or not debate_cfg["user_stance"]:
+                raise ValueError("debate topic and user_stance are required")
+
+            active_state = self._ensure_active_debate_state(conv_id, debate_cfg)
+            recent_before = (
+                self.conversation_service.get_recent_window(conv_id) if use_context else []
+            )
+            self.conversation_service.append_user_message(conv_id, query)
+
+            if self._is_debate_end_command(query):
+                history = self._collect_debate_history(
+                    conversation_id=conv_id,
+                    state_created_at=(active_state or {}).get("created_at"),
+                )
+                summary_prompt = self._build_debate_summary_prompt(debate_cfg, history)
+                answer = self._ensure_non_note_section(self._call_llm_answer(summary_prompt))
+                self.conversation_service.append_assistant_message(
+                    conv_id,
+                    answer,
+                    citations=[],
+                    is_clarification=False,
+                )
+                self.conversation_service.save_debate_state(
+                    conv_id,
+                    DebateState(
+                        topic=debate_cfg["topic"],
+                        user_stance=debate_cfg["user_stance"],
+                        judge_mode=debate_cfg["judge_mode"],
+                        status="ended",
+                    ),
+                )
+                self.conversation_service.refresh_summary_if_needed(
+                    conv_id,
+                    self._build_summary_text,
+                )
+                return AskResult(
+                    answer=answer,
+                    citations=[],
+                    conversation_id=conv_id,
+                    mode="debate",
+                    debate_status="ended",
+                    debate_event="end_summary",
+                )
+
+            summary = self.conversation_service.get_summary(conv_id) if use_context else ""
+            ctx = self._prepare_context(
+                query=query,
+                book_id=book_id,
+                book_title=book_title,
+                summary=summary,
+                recent_messages=recent_before if use_context else [],
+            )
+            debate_prompt = self._build_debate_turn_prompt(query, debate_cfg, ctx)
+            answer = self._ensure_non_note_section(self._call_llm_answer(debate_prompt))
+            response_citations = ctx.citations if ctx.has_chunks else []
+            self.conversation_service.append_assistant_message(
+                conv_id,
+                answer,
+                citations=[c.to_dict() for c in response_citations],
+                is_clarification=False,
+            )
+            self.conversation_service.refresh_summary_if_needed(
+                conv_id,
+                self._build_summary_text,
+            )
+            return AskResult(
+                answer=answer,
+                citations=response_citations,
+                conversation_id=conv_id,
+                mode="debate",
+                debate_status="active",
+                debate_event="normal",
+            )
 
         recent_before = (
             self.conversation_service.get_recent_window(conv_id) if use_context else []
@@ -445,6 +666,7 @@ class QAEngine:
                     conversation_id=conv_id,
                     needs_clarification=True,
                     clarification_question=question,
+                    mode="qa",
                 )
 
         summary = self.conversation_service.get_summary(conv_id) if use_context else ""
@@ -467,6 +689,7 @@ class QAEngine:
                 answer=answer,
                 citations=[],
                 conversation_id=conv_id,
+                mode="qa",
             )
 
         answer = self._call_llm_answer(ctx.prompt)
@@ -485,6 +708,7 @@ class QAEngine:
             answer=answer,
             citations=ctx.citations,
             conversation_id=conv_id,
+            mode="qa",
         )
 
     async def ask_stream(
@@ -493,7 +717,7 @@ class QAEngine:
         book_id: Optional[str] = None,
         book_title: Optional[str] = None,
     ) -> AsyncIterator[dict]:
-        """保留旧接口：单轮流式问答。"""
+        """Legacy streaming single-turn entrypoint."""
         settings = get_settings()
         ctx = self._prepare_context(query, book_id, book_title)
 
@@ -530,10 +754,119 @@ class QAEngine:
         book_title: Optional[str] = None,
         conversation_id: str | None = None,
         use_context: bool = True,
+        mode: str = "qa",
+        debate: dict | None = None,
     ) -> AsyncIterator[dict]:
-        """会话流式问答入口：新增 meta 事件并支持澄清流程。"""
+        """Streaming conversation entrypoint for QA mode and debate mode."""
         settings = get_settings()
         conv_id = self.conversation_service.ensure_conversation(conversation_id)
+
+        if mode == "debate":
+            debate_cfg = self._normalize_debate_config(debate)
+            if not debate_cfg["topic"] or not debate_cfg["user_stance"]:
+                raise ValueError("debate topic and user_stance are required")
+
+            active_state = self._ensure_active_debate_state(conv_id, debate_cfg)
+            recent_before = (
+                self.conversation_service.get_recent_window(conv_id) if use_context else []
+            )
+            self.conversation_service.append_user_message(conv_id, query)
+
+            if self._is_debate_end_command(query):
+                history = self._collect_debate_history(
+                    conversation_id=conv_id,
+                    state_created_at=(active_state or {}).get("created_at"),
+                )
+                summary_prompt = self._build_debate_summary_prompt(debate_cfg, history)
+                answer = self._ensure_non_note_section(self._call_llm_answer(summary_prompt))
+                self.conversation_service.append_assistant_message(
+                    conv_id,
+                    answer,
+                    citations=[],
+                    is_clarification=False,
+                )
+                self.conversation_service.save_debate_state(
+                    conv_id,
+                    DebateState(
+                        topic=debate_cfg["topic"],
+                        user_stance=debate_cfg["user_stance"],
+                        judge_mode=debate_cfg["judge_mode"],
+                        status="ended",
+                    ),
+                )
+                self.conversation_service.refresh_summary_if_needed(
+                    conv_id,
+                    self._build_summary_text,
+                )
+
+                yield {
+                    "event": "meta",
+                    "data": {
+                        "conversation_id": conv_id,
+                        "needs_clarification": False,
+                        "clarification_question": None,
+                        "mode": "debate",
+                        "debate_status": "ended",
+                        "debate_event": "end_summary",
+                    },
+                }
+                yield {"event": "delta", "data": {"content": answer}}
+                yield {"event": "citations", "data": []}
+                yield {"event": "done", "data": {}}
+                return
+
+            summary = self.conversation_service.get_summary(conv_id) if use_context else ""
+            ctx = self._prepare_context(
+                query=query,
+                book_id=book_id,
+                book_title=book_title,
+                summary=summary,
+                recent_messages=recent_before if use_context else [],
+            )
+            debate_prompt = self._build_debate_turn_prompt(query, debate_cfg, ctx)
+
+            yield {
+                "event": "meta",
+                "data": {
+                    "conversation_id": conv_id,
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                    "mode": "debate",
+                    "debate_status": "active",
+                    "debate_event": "normal",
+                },
+            }
+
+            stream = self.client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[{"role": "user", "content": debate_prompt}],
+                temperature=settings.temperature,
+                stream=True,
+            )
+
+            answer_parts: list[str] = []
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    answer_parts.append(delta)
+                    yield {"event": "delta", "data": {"content": delta}}
+
+            full_answer = self._ensure_non_note_section("".join(answer_parts))
+            response_citations = ctx.citations if ctx.has_chunks else []
+            self.conversation_service.append_assistant_message(
+                conv_id,
+                full_answer,
+                citations=[c.to_dict() for c in response_citations],
+                is_clarification=False,
+            )
+            self.conversation_service.refresh_summary_if_needed(
+                conv_id,
+                self._build_summary_text,
+            )
+
+            yield {"event": "citations", "data": [c.to_dict() for c in response_citations]}
+            yield {"event": "done", "data": {}}
+            return
 
         recent_before = (
             self.conversation_service.get_recent_window(conv_id) if use_context else []
@@ -555,6 +888,9 @@ class QAEngine:
                         "conversation_id": conv_id,
                         "needs_clarification": True,
                         "clarification_question": question,
+                        "mode": "qa",
+                        "debate_status": None,
+                        "debate_event": None,
                     },
                 }
                 yield {"event": "delta", "data": {"content": question}}
@@ -577,6 +913,9 @@ class QAEngine:
                 "conversation_id": conv_id,
                 "needs_clarification": False,
                 "clarification_question": None,
+                "mode": "qa",
+                "debate_status": None,
+                "debate_event": None,
             },
         }
 

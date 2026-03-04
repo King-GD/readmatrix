@@ -1,23 +1,25 @@
-<script setup lang="ts">
-import { Send, Loader2 } from "lucide-vue-next";
+﻿<script setup lang="ts">
+import { Loader2, Send } from "lucide-vue-next";
 
 interface Props {
   modelValue: string;
   loading?: boolean;
+  disabled?: boolean;
   placeholder?: string;
+  footerText?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
+  disabled: false,
   placeholder: "输入你的问题...",
+  footerText: "基于你的读书笔记回答，所有结论可追溯到原文。",
 });
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   submit: [];
 }>();
-
-const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
 function handleInput(event: Event) {
   const target = event.target as HTMLTextAreaElement;
@@ -28,13 +30,15 @@ function handleInput(event: Event) {
 function handleKeydown(event: KeyboardEvent) {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    emit("submit");
+    if (!props.disabled && !props.loading) {
+      emit("submit");
+    }
   }
 }
 
 function autoResize(element: HTMLTextAreaElement) {
   element.style.height = "auto";
-  element.style.height = Math.min(element.scrollHeight, 200) + "px";
+  element.style.height = `${Math.min(element.scrollHeight, 200)}px`;
 }
 </script>
 
@@ -44,17 +48,16 @@ function autoResize(element: HTMLTextAreaElement) {
       <div class="flex gap-2">
         <div class="relative flex-1">
           <textarea
-            ref="textareaRef"
             :value="modelValue"
             :placeholder="placeholder"
-            :disabled="loading"
+            :disabled="loading || disabled"
             rows="1"
             class="flex w-full resize-none rounded-md border border-input bg-background px-4 py-3 pr-12 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             @input="handleInput"
             @keydown="handleKeydown"
           />
           <UiButton
-            :disabled="loading || !modelValue.trim()"
+            :disabled="loading || disabled || !modelValue.trim()"
             size="icon"
             class="absolute bottom-2 right-2 h-8 w-8"
             @click="emit('submit')"
@@ -64,8 +67,8 @@ function autoResize(element: HTMLTextAreaElement) {
           </UiButton>
         </div>
       </div>
-      <p class="mt-2 text-xs text-muted-foreground text-center">
-        基于你的读书笔记回答，所有结论可追溯到原文
+      <p class="mt-2 text-center text-xs text-muted-foreground">
+        {{ footerText }}
       </p>
     </div>
   </div>

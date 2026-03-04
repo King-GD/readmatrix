@@ -376,6 +376,28 @@ class Database:
         rows = list(reversed(rows))
         return [self._to_message_dict(row) for row in rows]
 
+    def list_conversation_messages_since(
+        self,
+        conversation_id: str,
+        since_created_at: str,
+        limit: int = 200,
+        include_system: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read conversation messages since a timestamp in ascending order."""
+        system_filter = "" if include_system else " AND role != 'system'"
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM conversation_messages
+                WHERE conversation_id = ? AND created_at >= ? {system_filter}
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (conversation_id, since_created_at, limit),
+            ).fetchall()
+        return [self._to_message_dict(row) for row in rows]
+
     def get_recent_conversation_messages(
         self,
         conversation_id: str,
@@ -439,6 +461,28 @@ class Database:
             token_estimate=max(1, len(summary) // 4),
             is_summary=True,
         )
+
+    def get_latest_system_message_with_prefix(
+        self,
+        conversation_id: str,
+        prefix: str,
+    ) -> dict[str, Any] | None:
+        """Get latest non-summary system message that matches a content prefix."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM conversation_messages
+                WHERE conversation_id = ?
+                  AND role = 'system'
+                  AND is_summary = 0
+                  AND content LIKE ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (conversation_id, f"{prefix}%"),
+            ).fetchone()
+        return self._to_message_dict(row) if row else None
 
     def count_recent_clarifications(self, conversation_id: str, limit: int = 2) -> int:
         """统计最近连续澄清消息数量，用于避免无限反问。"""

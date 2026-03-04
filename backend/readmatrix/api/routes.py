@@ -1,6 +1,6 @@
 """API routes for health, indexing, conversations, and ask."""
 
-from typing import Optional
+from typing import Literal, Optional
 import json
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -18,6 +18,12 @@ router = APIRouter(prefix="/api")
 
 # === Request/Response Models ===
 
+class DebateRequest(BaseModel):
+    topic: str
+    user_stance: str
+    judge_mode: Literal["none", "winner"] = "none"
+
+
 class AskRequest(BaseModel):
     """问答请求模型。"""
 
@@ -25,6 +31,8 @@ class AskRequest(BaseModel):
     filters: Optional[dict] = None
     conversation_id: Optional[str] = None
     use_context: bool = True
+    mode: Literal["qa", "debate"] = "qa"
+    debate: Optional[DebateRequest] = None
 
 
 class AskResponse(BaseModel):
@@ -35,6 +43,9 @@ class AskResponse(BaseModel):
     conversation_id: str
     needs_clarification: bool = False
     clarification_question: Optional[str] = None
+    mode: Literal["qa", "debate"] = "qa"
+    debate_status: Optional[Literal["active", "ended"]] = None
+    debate_event: Optional[Literal["normal", "end_summary"]] = None
 
 
 class IndexRequest(BaseModel):
@@ -71,6 +82,7 @@ class ConversationMessagesResponse(BaseModel):
     limit: int
     offset: int
     total: int
+    debate_state: Optional[dict] = None
 
 
 class GenericStatusResponse(BaseModel):
@@ -253,6 +265,7 @@ async def get_conversation_messages(
         conversation_id=conversation_id,
         include_system=False,
     )
+    debate_state = service.get_latest_debate_state(conversation_id)
 
     return ConversationMessagesResponse(
         conversation_id=conversation_id,
@@ -270,6 +283,7 @@ async def get_conversation_messages(
         limit=limit,
         offset=offset,
         total=total,
+        debate_state=debate_state,
     )
 
 
@@ -322,6 +336,24 @@ async def ask(request: AskRequest, req: Request):
     filters = request.filters or {}
     book_id = filters.get("book_id")
     book_title = filters.get("book_title")
+    mode = request.mode
+    debate_payload = request.debate.model_dump() if request.debate else None
+
+    if mode == "debate":
+        if not debate_payload:
+            raise HTTPException(
+                status_code=400,
+                detail="debate mode requires debate config",
+            )
+        topic = (debate_payload.get("topic") or "").strip()
+        user_stance = (debate_payload.get("user_stance") or "").strip()
+        if not topic or not user_stance:
+            raise HTTPException(
+                status_code=400,
+                detail="debate topic and user_stance are required",
+            )
+        debate_payload["topic"] = topic
+        debate_payload["user_stance"] = user_stance
 
     accept = req.headers.get("accept", "")
     if "text/event-stream" in accept:
@@ -332,6 +364,8 @@ async def ask(request: AskRequest, req: Request):
                 book_title=book_title,
                 conversation_id=request.conversation_id,
                 use_context=request.use_context,
+                mode=mode,
+                debate=debate_payload,
             ),
             media_type="text/event-stream",
         )
@@ -344,6 +378,8 @@ async def ask(request: AskRequest, req: Request):
             book_title=book_title,
             conversation_id=request.conversation_id,
             use_context=request.use_context,
+            mode=mode,
+            debate=debate_payload,
         )
 
         return AskResponse(
@@ -352,6 +388,9 @@ async def ask(request: AskRequest, req: Request):
             conversation_id=result.conversation_id,
             needs_clarification=result.needs_clarification,
             clarification_question=result.clarification_question,
+            mode=result.mode,
+            debate_status=result.debate_status,
+            debate_event=result.debate_event,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -363,6 +402,8 @@ async def _stream_answer(
     book_title: str | None,
     conversation_id: str | None,
     use_context: bool,
+    mode: str,
+    debate: dict | None,
 ):
     """Generate SSE events for streaming answer with conversation metadata."""
     qa = QAEngine()
@@ -373,6 +414,8 @@ async def _stream_answer(
         book_title=book_title,
         conversation_id=conversation_id,
         use_context=use_context,
+        mode=mode,
+        debate=debate,
     ):
         event_type = event["event"]
         data = json.dumps(event["data"], ensure_ascii=False)

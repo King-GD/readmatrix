@@ -1,11 +1,9 @@
-/**
- * 聊天状态管理：支持 SSE 流式问答、引用管理与会话恢复。
+﻿/**
+ * Chat state management: supports SSE streaming, citations, conversation restore,
+ * and debate mode.
  */
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
-/**
- * 对话消息。
- */
 export interface Message {
   id: string;
   role: "user" | "assistant";
@@ -14,9 +12,6 @@ export interface Message {
   isClarification?: boolean;
 }
 
-/**
- * 引用对象，与后端 citation 协议保持一致。
- */
 export interface Citation {
   id: number;
   chunk_id: string;
@@ -31,12 +26,26 @@ export interface Citation {
   obsidian_uri?: string;
 }
 
-/**
- * 问答过滤条件。
- */
 export interface ChatFilters {
   book_id?: string;
   book_title?: string;
+}
+
+export type ChatMode = "qa" | "debate";
+export type DebateStatus = "idle" | "active" | "ended";
+export type DebateJudgeMode = "none" | "winner";
+
+export interface DebateConfig {
+  topic: string;
+  userStance: string;
+  judgeMode: DebateJudgeMode;
+}
+
+interface DebateStatePayload {
+  topic?: string;
+  user_stance?: string;
+  judge_mode?: DebateJudgeMode;
+  status?: "active" | "ended";
 }
 
 interface ConversationListResponse {
@@ -51,6 +60,7 @@ interface ConversationListResponse {
   limit: number;
   offset: number;
   total: number;
+  debate_state?: DebateStatePayload | null;
 }
 
 interface ConversationCreateResponse {
@@ -59,9 +69,6 @@ interface ConversationCreateResponse {
 
 const STORAGE_KEY = "readmatrix_conversation_id";
 
-/**
- * 组合式函数：提供对话提交、恢复、清理和新建会话能力。
- */
 export function useChat(options?: { apiUrl?: string }) {
   const config = useRuntimeConfig();
   const apiUrl = options?.apiUrl || config.public.apiUrl;
@@ -75,14 +82,13 @@ export function useChat(options?: { apiUrl?: string }) {
   const selectedCitation = ref<Citation | null>(null);
   const conversationId = ref<string | null>(null);
 
-  /**
-   * 生成前端临时消息 ID。
-   */
+  const mode = ref<ChatMode>("qa");
+  const debateConfig = ref<DebateConfig | null>(null);
+  const debateStatus = ref<DebateStatus>("idle");
+  const isDebateMode = computed(() => mode.value === "debate");
+
   const generateId = () => Math.random().toString(36).slice(2);
 
-  /**
-   * 持久化当前会话 ID 到浏览器。
-   */
   function persistConversationId(id: string | null) {
     if (typeof window === "undefined") {
       return;
@@ -94,17 +100,77 @@ export function useChat(options?: { apiUrl?: string }) {
     localStorage.setItem(STORAGE_KEY, id);
   }
 
-  /**
-   * 更新会话 ID 状态并同步本地存储。
-   */
   function setConversationId(id: string | null) {
     conversationId.value = id;
     persistConversationId(id);
   }
 
-  /**
-   * 创建后端会话。
-   */
+  function normalizeDebateConfig(raw?: Partial<DebateConfig> | DebateStatePayload | null): DebateConfig | null {
+    if (!raw) {
+      return null;
+    }
+
+    const source = raw as Record<string, unknown>;
+    const topic = String(source.topic || "").trim();
+    const userStance = String(source.userStance || source.user_stance || "").trim();
+    const judgeMode = String(source.judgeMode || source.judge_mode || "none");
+
+    if (!topic || !userStance) {
+      return null;
+    }
+
+    return {
+      topic,
+      userStance,
+      judgeMode: judgeMode === "winner" ? "winner" : "none",
+    };
+  }
+
+  function applyDebateState(state?: DebateStatePayload | null) {
+    const cfg = normalizeDebateConfig(state);
+    if (!cfg) {
+      mode.value = "qa";
+      debateConfig.value = null;
+      debateStatus.value = "idle";
+      return;
+    }
+
+    if (state?.status === "active") {
+      mode.value = "debate";
+      debateConfig.value = cfg;
+      debateStatus.value = "active";
+      return;
+    }
+
+    mode.value = "qa";
+    debateConfig.value = null;
+    debateStatus.value = "ended";
+  }
+
+  function startDebate(configInput: DebateConfig) {
+    const cfg = normalizeDebateConfig(configInput);
+    if (!cfg) {
+      error.value = "请先填写完整的辩题和你的立场";
+      return;
+    }
+    mode.value = "debate";
+    debateConfig.value = cfg;
+    debateStatus.value = "active";
+    error.value = null;
+  }
+
+  function exitDebateMode() {
+    mode.value = "qa";
+    debateConfig.value = null;
+    debateStatus.value = "idle";
+  }
+
+  function resetDebateState() {
+    mode.value = "qa";
+    debateConfig.value = null;
+    debateStatus.value = "idle";
+  }
+
   async function createConversation(): Promise<string> {
     const response = await fetch(`${apiUrl}/api/conversations`, {
       method: "POST",
@@ -127,9 +193,6 @@ export function useChat(options?: { apiUrl?: string }) {
     return payload.conversation_id;
   }
 
-  /**
-   * 确保存在可用会话，不存在时自动创建。
-   */
   async function ensureConversation(): Promise<string> {
     if (conversationId.value) {
       return conversationId.value;
@@ -137,9 +200,6 @@ export function useChat(options?: { apiUrl?: string }) {
     return createConversation();
   }
 
-  /**
-   * 从后端恢复历史会话消息。
-   */
   async function restoreConversationMessages() {
     if (typeof window === "undefined") {
       return;
@@ -157,6 +217,7 @@ export function useChat(options?: { apiUrl?: string }) {
 
       if (response.status === 404) {
         setConversationId(null);
+        resetDebateState();
         return;
       }
 
@@ -181,17 +242,23 @@ export function useChat(options?: { apiUrl?: string }) {
         currentCitations.value = lastAssistant.citations;
         selectedCitation.value = lastAssistant.citations[0] || null;
       }
+
+      applyDebateState(payload.debate_state || null);
     } catch (e) {
       error.value = e instanceof Error ? e.message : "恢复会话失败";
     }
   }
 
-  /**
-   * 提交用户消息并处理 SSE 响应。
-   */
   async function submit() {
     if (!input.value.trim() || isLoading.value) {
       return;
+    }
+
+    if (mode.value === "debate") {
+      if (debateStatus.value !== "active" || !debateConfig.value) {
+        error.value = "请先完成辩题和立场配置，再开始辩论";
+        return;
+      }
     }
 
     const query = input.value.trim();
@@ -218,9 +285,26 @@ export function useChat(options?: { apiUrl?: string }) {
     const assistantIndex = messages.value.length - 1;
 
     let isClarification = false;
+    let shouldExitDebateAfterDone = false;
 
     try {
       const activeConversationId = await ensureConversation();
+
+      const body: Record<string, unknown> = {
+        query,
+        filters: filters.value,
+        conversation_id: activeConversationId,
+        use_context: true,
+        mode: mode.value,
+      };
+
+      if (mode.value === "debate" && debateConfig.value) {
+        body.debate = {
+          topic: debateConfig.value.topic,
+          user_stance: debateConfig.value.userStance,
+          judge_mode: debateConfig.value.judgeMode,
+        };
+      }
 
       const response = await fetch(`${apiUrl}/api/ask`, {
         method: "POST",
@@ -228,16 +312,12 @@ export function useChat(options?: { apiUrl?: string }) {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({
-          query,
-          filters: filters.value,
-          conversation_id: activeConversationId,
-          use_context: true,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+        const detail = await response.text();
+        throw new Error(`API error: ${response.status} ${detail}`);
       }
 
       const reader = response.body?.getReader();
@@ -278,6 +358,19 @@ export function useChat(options?: { apiUrl?: string }) {
                 setConversationId(data.conversation_id);
               }
               isClarification = Boolean(data.needs_clarification);
+
+              if (data.mode === "debate") {
+                mode.value = "debate";
+              }
+
+              if (data.debate_status === "active") {
+                debateStatus.value = "active";
+              }
+
+              if (data.debate_status === "ended") {
+                debateStatus.value = "ended";
+                shouldExitDebateAfterDone = true;
+              }
             } else if (currentEvent === "delta") {
               const currentMessage = messages.value[assistantIndex];
               messages.value[assistantIndex] = {
@@ -287,11 +380,8 @@ export function useChat(options?: { apiUrl?: string }) {
               };
             } else if (currentEvent === "citations") {
               const currentMessage = messages.value[assistantIndex];
-              const noInfo = currentMessage.content.includes(
-                "根据你的笔记，我没有找到相关信息",
-              );
               const citations =
-                noInfo || isClarification || !Array.isArray(data) ? [] : data;
+                isClarification || !Array.isArray(data) ? [] : data;
 
               currentCitations.value = citations;
               messages.value[assistantIndex] = {
@@ -314,12 +404,13 @@ export function useChat(options?: { apiUrl?: string }) {
       };
     } finally {
       isLoading.value = false;
+      if (shouldExitDebateAfterDone) {
+        mode.value = "qa";
+        debateConfig.value = null;
+      }
     }
   }
 
-  /**
-   * 仅清空当前页面消息，不删除后端会话。
-   */
   function clear() {
     messages.value = [];
     currentCitations.value = [];
@@ -327,12 +418,10 @@ export function useChat(options?: { apiUrl?: string }) {
     error.value = null;
   }
 
-  /**
-   * 开启新对话：清空界面并创建新会话。
-   */
   async function startNewConversation() {
     clear();
     setConversationId(null);
+    resetDebateState();
     try {
       await createConversation();
     } catch (e) {
@@ -340,16 +429,10 @@ export function useChat(options?: { apiUrl?: string }) {
     }
   }
 
-  /**
-   * 选择侧栏展示的引用。
-   */
   function selectCitation(citation: Citation) {
     selectedCitation.value = citation;
   }
 
-  /**
-   * 在 Obsidian 中打开引用。
-   */
   function openInObsidian(citation: Citation) {
     if (citation.obsidian_uri) {
       window.open(citation.obsidian_uri, "_blank");
@@ -369,9 +452,15 @@ export function useChat(options?: { apiUrl?: string }) {
     selectedCitation,
     filters,
     conversationId,
+    mode,
+    isDebateMode,
+    debateConfig,
+    debateStatus,
     submit,
     clear,
     startNewConversation,
+    startDebate,
+    exitDebateMode,
     selectCitation,
     openInObsidian,
   };

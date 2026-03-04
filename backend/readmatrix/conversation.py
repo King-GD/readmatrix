@@ -1,16 +1,20 @@
-"""会话管理与上下文组装服务。"""
+﻿"""Conversation management and context assembly services."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Callable
 
 from .indexer.database import Database
 
 
+DEBATE_STATE_PREFIX = "__debate_state__:"
+
+
 @dataclass
 class ConversationMessage:
-    """会话消息模型，用于服务层与 API 层传递。"""
+    """Conversation message model used between service and API layers."""
 
     id: str
     conversation_id: str
@@ -24,7 +28,7 @@ class ConversationMessage:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "ConversationMessage":
-        """从数据库字典记录构建消息对象。"""
+        """Build a message object from database payload."""
         return cls(
             id=payload["id"],
             conversation_id=payload["conversation_id"],
@@ -38,8 +42,26 @@ class ConversationMessage:
         )
 
 
+@dataclass
+class DebateState:
+    """Debate runtime state persisted as hidden system metadata."""
+
+    topic: str
+    user_stance: str
+    judge_mode: str = "none"
+    status: str = "active"
+
+    def to_dict(self) -> dict:
+        return {
+            "topic": self.topic,
+            "user_stance": self.user_stance,
+            "judge_mode": self.judge_mode,
+            "status": self.status,
+        }
+
+
 class ConversationService:
-    """会话服务，负责会话 CRUD、消息读写与摘要刷新触发。"""
+    """Conversation service for CRUD, message IO, and summary refresh."""
 
     def __init__(
         self,
@@ -54,17 +76,17 @@ class ConversationService:
         self.summary_max_chars = max(200, summary_max_chars)
 
     def create_conversation(self, title: str | None = None) -> str:
-        """创建新会话并返回会话 ID。"""
+        """Create and return a new conversation ID."""
         return self.db.create_conversation(title=title)
 
     def ensure_conversation(self, conversation_id: str | None = None) -> str:
-        """确保会话可用：不存在则自动创建新会话。"""
+        """Ensure conversation is usable; create one when absent."""
         if conversation_id and self.db.conversation_exists(conversation_id):
             return conversation_id
         return self.create_conversation()
 
     def delete_conversation(self, conversation_id: str):
-        """删除会话及其消息。"""
+        """Delete conversation and all its messages."""
         self.db.delete_conversation(conversation_id)
 
     def list_messages(
@@ -74,7 +96,7 @@ class ConversationService:
         offset: int = 0,
         include_system: bool = False,
     ) -> list[ConversationMessage]:
-        """分页读取会话消息，默认不包含 system 摘要消息。"""
+        """Read conversation messages in ascending order."""
         records = self.db.list_conversation_messages(
             conversation_id=conversation_id,
             limit=limit,
@@ -83,8 +105,61 @@ class ConversationService:
         )
         return [ConversationMessage.from_dict(item) for item in records]
 
+    def list_messages_since(
+        self,
+        conversation_id: str,
+        since_created_at: str,
+        limit: int = 200,
+        include_system: bool = False,
+    ) -> list[ConversationMessage]:
+        """Read conversation messages since a timestamp."""
+        records = self.db.list_conversation_messages_since(
+            conversation_id=conversation_id,
+            since_created_at=since_created_at,
+            limit=limit,
+            include_system=include_system,
+        )
+        return [ConversationMessage.from_dict(item) for item in records]
+
+    def get_latest_debate_state(self, conversation_id: str) -> dict | None:
+        """Read latest hidden debate state metadata from system message."""
+        payload = self.db.get_latest_system_message_with_prefix(
+            conversation_id=conversation_id,
+            prefix=DEBATE_STATE_PREFIX,
+        )
+        if not payload:
+            return None
+
+        content = payload.get("content", "")
+        if not isinstance(content, str) or not content.startswith(DEBATE_STATE_PREFIX):
+            return None
+
+        raw_json = content[len(DEBATE_STATE_PREFIX) :]
+        try:
+            state = json.loads(raw_json)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(state, dict):
+            return None
+
+        state["created_at"] = payload.get("created_at")
+        return state
+
+    def save_debate_state(self, conversation_id: str, state: DebateState):
+        """Persist hidden debate state metadata into system messages."""
+        content = f"{DEBATE_STATE_PREFIX}{json.dumps(state.to_dict(), ensure_ascii=False)}"
+        self.db.add_conversation_message(
+            conversation_id=conversation_id,
+            role="system",
+            content=content,
+            citations=[],
+            token_estimate=self._estimate_tokens(content),
+            is_summary=False,
+        )
+
     def append_user_message(self, conversation_id: str, content: str) -> str:
-        """追加用户消息并返回消息 ID。"""
+        """Append a user message and return message ID."""
         return self.db.add_conversation_message(
             conversation_id=conversation_id,
             role="user",
@@ -100,7 +175,7 @@ class ConversationService:
         citations: list[dict] | None = None,
         is_clarification: bool = False,
     ) -> str:
-        """追加助手消息并返回消息 ID。"""
+        """Append an assistant message and return message ID."""
         return self.db.add_conversation_message(
             conversation_id=conversation_id,
             role="assistant",
@@ -111,7 +186,7 @@ class ConversationService:
         )
 
     def get_recent_window(self, conversation_id: str) -> list[ConversationMessage]:
-        """获取最近窗口消息（按轮次换算为消息条数）。"""
+        """Read latest message window by turns."""
         limit = self.window_turns * 2
         records = self.db.get_recent_conversation_messages(
             conversation_id=conversation_id,
@@ -121,18 +196,18 @@ class ConversationService:
         return [ConversationMessage.from_dict(item) for item in records]
 
     def get_summary(self, conversation_id: str) -> str:
-        """读取会话摘要，不存在时返回空字符串。"""
+        """Read latest summary text."""
         return self.db.get_latest_summary(conversation_id) or ""
 
     def save_summary(self, conversation_id: str, summary: str):
-        """保存会话摘要，长度超过限制时自动截断。"""
+        """Save summary text with truncation."""
         if not summary:
             return
         safe_summary = summary[: self.summary_max_chars]
         self.db.save_summary(conversation_id, safe_summary)
 
     def should_refresh_summary(self, conversation_id: str) -> bool:
-        """根据用户轮次判断是否需要刷新摘要。"""
+        """Decide whether summary should be refreshed by user turn count."""
         user_count = self.db.count_conversation_messages(
             conversation_id=conversation_id,
             include_system=False,
@@ -145,7 +220,7 @@ class ConversationService:
         conversation_id: str,
         summary_builder: Callable[[str, list[ConversationMessage]], str],
     ) -> None:
-        """满足阈值时刷新摘要，失败则静默降级。"""
+        """Refresh summary when threshold is reached; degrade silently on failure."""
         if not self.should_refresh_summary(conversation_id):
             return
 
@@ -168,16 +243,16 @@ class ConversationService:
             self.save_summary(conversation_id, updated_summary)
 
     def get_recent_clarification_count(self, conversation_id: str, limit: int = 2) -> int:
-        """读取最近连续澄清次数，避免无限澄清循环。"""
+        """Count recent consecutive clarification replies."""
         return self.db.count_recent_clarifications(conversation_id=conversation_id, limit=limit)
 
     def _estimate_tokens(self, content: str) -> int:
-        """粗略估算 token 数，便于后续做成本统计。"""
+        """Rough token estimate for future cost tracking."""
         return max(1, len(content) // 4)
 
 
 class ContextAssembler:
-    """上下文组装器，统一拼装摘要、最近对话与检索上下文。"""
+    """Assemble summary, recent dialogue, and retrieved note context."""
 
     def __init__(self, summary_max_chars: int = 1200):
         self.summary_max_chars = max(200, summary_max_chars)
@@ -188,7 +263,7 @@ class ContextAssembler:
         recent_messages: list[ConversationMessage],
         retrieved_context: str,
     ) -> dict[str, str]:
-        """输出结构化上下文片段，供 Prompt 模板直接注入。"""
+        """Build structured context sections for prompt injection."""
         conversation_summary = summary.strip()[: self.summary_max_chars] if summary else ""
         recent_dialogue = self._format_recent_dialogue(recent_messages)
         note_context = retrieved_context.strip() if retrieved_context else ""
@@ -200,7 +275,7 @@ class ContextAssembler:
         }
 
     def _format_recent_dialogue(self, messages: list[ConversationMessage]) -> str:
-        """将最近消息格式化为可读对话文本。"""
+        """Format recent messages into readable dialogue text."""
         lines: list[str] = []
         for item in messages:
             if item.role == "user":
