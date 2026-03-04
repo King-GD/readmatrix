@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { useChat } from "@/composables/useChat";
-import { MessageSquarePlus, Scale, Swords, Trash2, X } from "lucide-vue-next";
+import { Scale, Swords, Trash2, X } from "lucide-vue-next";
 
 const {
   messages,
@@ -13,9 +13,14 @@ const {
   isDebateMode,
   debateConfig,
   debateStatus,
+  conversationId,
+  conversationList,
   submit,
   clear,
   startNewConversation,
+  loadConversationList,
+  switchConversation,
+  deleteConversation,
   startDebate,
   exitDebateMode,
   selectCitation,
@@ -114,6 +119,14 @@ function cancelDebateSetup() {
 
 <template>
   <div class="flex flex-1 overflow-hidden">
+    <ChatHistorySidebar
+      :conversations="conversationList"
+      :active-id="conversationId"
+      @select="switchConversation"
+      @delete="deleteConversation"
+      @new="startNewConversation"
+    />
+
     <div class="flex min-w-0 flex-1 flex-col">
       <div class="flex justify-end gap-2 border-b p-2">
         <button
@@ -122,13 +135,6 @@ function cancelDebateSetup() {
         >
           <Swords class="h-3 w-3" />
           {{ isDebateMode ? "退出辩论" : "辩论模式" }}
-        </button>
-        <button
-          class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          @click="startNewConversation"
-        >
-          <MessageSquarePlus class="h-3 w-3" />
-          新对话
         </button>
         <button
           v-if="messages.length > 0"

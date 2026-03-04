@@ -74,6 +74,27 @@ class ConversationCreateResponse(BaseModel):
     conversation_id: str
 
 
+class ConversationListItem(BaseModel):
+    """会话列表单条。"""
+
+    id: str
+    title: Optional[str] = None
+    created_at: str
+    updated_at: str
+    status: str
+    message_count: int
+    preview: str
+
+
+class ConversationListResponse(BaseModel):
+    """会话列表响应。"""
+
+    conversations: list[ConversationListItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class ConversationMessagesResponse(BaseModel):
     """会话消息分页响应。"""
 
@@ -231,6 +252,22 @@ async def doctor():
 
 
 # === Conversations ===
+
+@router.get("/conversations", response_model=ConversationListResponse)
+async def list_conversations(
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """列出所有会话，按最后活跃时间倒序。"""
+    service = ConversationService()
+    conversations, total = service.list_conversations(limit=limit, offset=offset)
+    return ConversationListResponse(
+        conversations=conversations,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
 
 @router.post("/conversations", response_model=ConversationCreateResponse)
 async def create_conversation(request: ConversationCreateRequest | None = None):

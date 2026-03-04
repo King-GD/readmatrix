@@ -228,6 +228,54 @@ class Database:
 
     # === Conversations ===
 
+    def list_conversations(
+        self,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """列出所有会话，按最后活跃时间倒序，返回 (conversations, total)。"""
+        with self.connection() as conn:
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM conversations"
+            ).fetchone()
+            total = int(total_row["count"]) if total_row else 0
+
+            rows = conn.execute(
+                """
+                SELECT
+                    c.id,
+                    c.title,
+                    c.created_at,
+                    c.updated_at,
+                    c.status,
+                    (SELECT COUNT(*) FROM conversation_messages m
+                     WHERE m.conversation_id = c.id AND m.role != 'system') AS message_count,
+                    (SELECT m2.content FROM conversation_messages m2
+                     WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                     ORDER BY m2.created_at DESC LIMIT 1) AS last_user_message
+                FROM conversations c
+                ORDER BY c.updated_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+
+            conversations = []
+            for row in rows:
+                last_msg = row["last_user_message"] or ""
+                preview = last_msg[:50].strip() if last_msg else ""
+                conversations.append({
+                    "id": row["id"],
+                    "title": row["title"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "status": row["status"],
+                    "message_count": row["message_count"],
+                    "preview": preview,
+                })
+
+            return conversations, total
+
     def create_conversation(
         self,
         title: str | None = None,
@@ -325,6 +373,13 @@ class Database:
                     int(is_summary),
                 ),
             )
+            # Auto-generate title from first user message
+            if role == "user":
+                conn.execute(
+                    """UPDATE conversations SET title = ?
+                       WHERE id = ? AND (title IS NULL OR title = '')""",
+                    (content[:30].strip(), conversation_id),
+                )
             conn.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (created_at, conversation_id),

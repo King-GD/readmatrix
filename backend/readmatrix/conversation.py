@@ -75,6 +75,14 @@ class ConversationService:
         self.summary_refresh_every = max(1, summary_refresh_every)
         self.summary_max_chars = max(200, summary_max_chars)
 
+    def list_conversations(
+        self,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """List all conversations ordered by last activity."""
+        return self.db.list_conversations(limit=limit, offset=offset)
+
     def create_conversation(self, title: str | None = None) -> str:
         """Create and return a new conversation ID."""
         return self.db.create_conversation(title=title)

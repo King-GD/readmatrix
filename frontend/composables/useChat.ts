@@ -67,6 +67,23 @@ interface ConversationCreateResponse {
   conversation_id: string;
 }
 
+export interface ConversationItem {
+  id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  status: string;
+  message_count: number;
+  preview: string;
+}
+
+interface ConversationListApiResponse {
+  conversations: ConversationItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 const STORAGE_KEY = "readmatrix_conversation_id";
 
 export function useChat(options?: { apiUrl?: string }) {
@@ -81,6 +98,8 @@ export function useChat(options?: { apiUrl?: string }) {
   const filters = ref<ChatFilters>({});
   const selectedCitation = ref<Citation | null>(null);
   const conversationId = ref<string | null>(null);
+  const conversationList = ref<ConversationItem[]>([]);
+  const conversationTotal = ref(0);
 
   const mode = ref<ChatMode>("qa");
   const debateConfig = ref<DebateConfig | null>(null);
@@ -408,6 +427,7 @@ export function useChat(options?: { apiUrl?: string }) {
         mode.value = "qa";
         debateConfig.value = null;
       }
+      loadConversationList();
     }
   }
 
@@ -424,8 +444,98 @@ export function useChat(options?: { apiUrl?: string }) {
     resetDebateState();
     try {
       await createConversation();
+      await loadConversationList();
     } catch (e) {
       error.value = e instanceof Error ? e.message : "创建新对话失败";
+    }
+  }
+
+  async function loadConversationList(limit = 30, offset = 0) {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const response = await fetch(
+        `${apiUrl}/api/conversations?limit=${limit}&offset=${offset}`,
+      );
+      if (!response.ok) {
+        throw new Error(`加载对话列表失败: ${response.status}`);
+      }
+      const payload = (await response.json()) as ConversationListApiResponse;
+      conversationList.value = payload.conversations;
+      conversationTotal.value = payload.total;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "加载对话列表失败";
+    }
+  }
+
+  async function switchConversation(targetId: string) {
+    if (targetId === conversationId.value) {
+      return;
+    }
+    clear();
+    resetDebateState();
+    setConversationId(targetId);
+
+    try {
+      const response = await fetch(
+        `${apiUrl}/api/conversations/${targetId}/messages?limit=60&offset=0`,
+      );
+      if (response.status === 404) {
+        setConversationId(null);
+        await loadConversationList();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`加载会话失败: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as ConversationListResponse;
+      messages.value = payload.messages.map((item) => ({
+        id: item.id,
+        role: item.role,
+        content: item.content,
+        citations: item.citations || [],
+        isClarification: Boolean(item.is_clarification),
+      }));
+
+      const lastAssistant = [...messages.value]
+        .reverse()
+        .find((item) => item.role === "assistant" && item.citations?.length);
+      if (lastAssistant?.citations) {
+        currentCitations.value = lastAssistant.citations;
+        selectedCitation.value = lastAssistant.citations[0] || null;
+      }
+
+      applyDebateState(payload.debate_state || null);
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "切换会话失败";
+    }
+  }
+
+  async function deleteConversation(targetId: string) {
+    try {
+      const response = await fetch(`${apiUrl}/api/conversations/${targetId}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error(`删除会话失败: ${response.status}`);
+      }
+
+      if (targetId === conversationId.value) {
+        clear();
+        setConversationId(null);
+        resetDebateState();
+      }
+
+      await loadConversationList();
+
+      // Auto-switch to first available conversation
+      if (!conversationId.value && conversationList.value.length > 0) {
+        await switchConversation(conversationList.value[0].id);
+      }
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "删除会话失败";
     }
   }
 
@@ -441,6 +551,7 @@ export function useChat(options?: { apiUrl?: string }) {
 
   onMounted(() => {
     restoreConversationMessages();
+    loadConversationList();
   });
 
   return {
@@ -452,6 +563,8 @@ export function useChat(options?: { apiUrl?: string }) {
     selectedCitation,
     filters,
     conversationId,
+    conversationList,
+    conversationTotal,
     mode,
     isDebateMode,
     debateConfig,
@@ -459,6 +572,9 @@ export function useChat(options?: { apiUrl?: string }) {
     submit,
     clear,
     startNewConversation,
+    loadConversationList,
+    switchConversation,
+    deleteConversation,
     startDebate,
     exitDebateMode,
     selectCitation,
