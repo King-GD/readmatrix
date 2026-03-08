@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { useChat } from "@/composables/useChat";
-import { Scale, Swords, Trash2, X } from "lucide-vue-next";
+import { BookOpen, Scale, Swords, Trash2, X } from "lucide-vue-next";
 
 const {
   messages,
@@ -21,6 +21,7 @@ const {
   loadConversationList,
   switchConversation,
   deleteConversation,
+  generateDailyReview,
   startDebate,
   exitDebateMode,
   selectCitation,
@@ -129,6 +130,13 @@ function cancelDebateSetup() {
 
     <div class="flex min-w-0 flex-1 flex-col">
       <div class="flex justify-end gap-2 border-b p-2">
+        <button
+          class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          @click="generateDailyReview"
+        >
+          <BookOpen class="h-3 w-3" />
+          今日回顾
+        </button>
         <button
           class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           @click="toggleDebateMode"

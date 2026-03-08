@@ -207,3 +207,19 @@ class FileRecord:
     book_id: str | None
     last_error: str | None
     updated_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class ReviewItem:
+    """Review schedule record for one indexed chunk."""
+
+    chunk_id: str
+    source_path: str
+    content_type: str
+    first_seen_at: datetime
+    last_reviewed_at: datetime | None
+    review_count: int
+    next_review_at: datetime
+    status: str = "active"
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)

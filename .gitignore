@@ -66,6 +66,8 @@ htmlcov/
 .tox/
 .nox/
 eval_cases.jsonl
+frontend/test-results/
+frontend/playwright-report/
 
 # ===== Data & Storage =====
 backend/data/

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import get_settings
-from ..models import FileRecord
+from ..models import FileRecord, ReviewItem
 
 
 CREATE_TABLES_SQL = """
@@ -56,12 +56,27 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS review_items (
+    chunk_id TEXT PRIMARY KEY,
+    source_path TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_reviewed_at TEXT,
+    review_count INTEGER NOT NULL DEFAULT 0,
+    next_review_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 CREATE INDEX IF NOT EXISTS idx_files_book_id ON files(book_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_conv_updated_at ON conversations(updated_at);
 CREATE INDEX IF NOT EXISTS idx_msg_conversation_created_at ON conversation_messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_msg_conversation_summary ON conversation_messages(conversation_id, is_summary);
+CREATE INDEX IF NOT EXISTS idx_review_next_at ON review_items(next_review_at, status);
+CREATE INDEX IF NOT EXISTS idx_review_source_path ON review_items(source_path);
 """
 
 
@@ -120,6 +135,24 @@ class Database:
                     updated_at=datetime.fromisoformat(row["updated_at"]),
                 )
             return None
+
+    def list_file_records(self) -> list[FileRecord]:
+        """List all file records with full metadata."""
+        with self.connection() as conn:
+            rows = conn.execute("SELECT * FROM files").fetchall()
+        return [
+            FileRecord(
+                path=row["path"],
+                hash=row["hash"],
+                mtime=row["mtime"],
+                status=row["status"],
+                source_type=row["source_type"],
+                book_id=row["book_id"],
+                last_error=row["last_error"],
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+            for row in rows
+        ]
 
     def upsert_file_record(self, record: FileRecord):
         """Insert or update a file record"""
@@ -226,6 +259,114 @@ class Database:
                 ).fetchone()
             return dict(row) if row else None
 
+    # === Review Items ===
+
+    def get_review_item(self, chunk_id: str) -> ReviewItem | None:
+        """Get a review item by chunk ID."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_items WHERE chunk_id = ?",
+                (chunk_id,),
+            ).fetchone()
+        return self._to_review_item(row) if row else None
+
+    def create_review_item(self, item: ReviewItem):
+        """Create a review item if it does not already exist."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO review_items (
+                    chunk_id,
+                    source_path,
+                    content_type,
+                    first_seen_at,
+                    last_reviewed_at,
+                    review_count,
+                    next_review_at,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.chunk_id,
+                    item.source_path,
+                    item.content_type,
+                    item.first_seen_at.isoformat(),
+                    item.last_reviewed_at.isoformat() if item.last_reviewed_at else None,
+                    item.review_count,
+                    item.next_review_at.isoformat(),
+                    item.status,
+                    item.created_at.isoformat(),
+                    item.updated_at.isoformat(),
+                ),
+            )
+
+    def list_due_review_items(
+        self,
+        due_before: datetime,
+        limit: int = 50,
+    ) -> list[ReviewItem]:
+        """List active review items due before the provided timestamp."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM review_items
+                WHERE status = 'active' AND next_review_at <= ?
+                ORDER BY next_review_at ASC, review_count DESC
+                LIMIT ?
+                """,
+                (due_before.isoformat(), limit),
+            ).fetchall()
+        return [self._to_review_item(row) for row in rows]
+
+    def mark_review_item_reviewed(
+        self,
+        chunk_id: str,
+        reviewed_at: datetime,
+        next_review_at: datetime,
+    ):
+        """Advance the review schedule after an item is shown."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE review_items
+                SET
+                    last_reviewed_at = ?,
+                    review_count = review_count + 1,
+                    next_review_at = ?,
+                    updated_at = ?
+                WHERE chunk_id = ?
+                """,
+                (
+                    reviewed_at.isoformat(),
+                    next_review_at.isoformat(),
+                    reviewed_at.isoformat(),
+                    chunk_id,
+                ),
+            )
+
+    def archive_review_item(self, chunk_id: str):
+        """Archive a review item whose source chunk is gone."""
+        now = datetime.now().isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE review_items
+                SET status = 'archived', updated_at = ?
+                WHERE chunk_id = ?
+                """,
+                (now, chunk_id),
+            )
+
+    def count_review_items(self) -> int:
+        """Count all review items."""
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM review_items").fetchone()
+        return int(row["count"]) if row else 0
+
     # === Conversations ===
 
     def list_conversations(
@@ -301,6 +442,21 @@ class Database:
             row = conn.execute(
                 "SELECT * FROM conversations WHERE id = ?",
                 (conversation_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_conversation_by_title(self, title: str) -> dict[str, Any] | None:
+        """Get the most recent conversation matching an exact title."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM conversations
+                WHERE title = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (title,),
             ).fetchone()
             return dict(row) if row else None
 
@@ -560,3 +716,22 @@ class Database:
             else:
                 break
         return count
+
+    def _to_review_item(self, row: sqlite3.Row) -> ReviewItem:
+        """Convert a row into a review item."""
+        return ReviewItem(
+            chunk_id=row["chunk_id"],
+            source_path=row["source_path"],
+            content_type=row["content_type"],
+            first_seen_at=datetime.fromisoformat(row["first_seen_at"]),
+            last_reviewed_at=(
+                datetime.fromisoformat(row["last_reviewed_at"])
+                if row["last_reviewed_at"]
+                else None
+            ),
+            review_count=int(row["review_count"]),
+            next_review_at=datetime.fromisoformat(row["next_review_at"]),
+            status=row["status"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
