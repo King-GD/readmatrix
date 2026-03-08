@@ -67,6 +67,12 @@ interface ConversationCreateResponse {
   conversation_id: string;
 }
 
+interface DailyReviewResponse {
+  conversation_id: string;
+  title: string;
+  status: "existing" | "empty" | "ready";
+}
+
 export interface ConversationItem {
   id: string;
   title: string | null;
@@ -539,6 +545,32 @@ export function useChat(options?: { apiUrl?: string }) {
     }
   }
 
+  async function generateDailyReview() {
+    if (isLoading.value) {
+      return;
+    }
+
+    isLoading.value = true;
+    error.value = null;
+
+    try {
+      const response = await fetch(`${apiUrl}/api/review/daily`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`生成今日回顾失败: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as DailyReviewResponse;
+      await loadConversationList();
+      await switchConversation(payload.conversation_id);
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "生成今日回顾失败";
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
   function selectCitation(citation: Citation) {
     selectedCitation.value = citation;
   }
@@ -575,6 +607,7 @@ export function useChat(options?: { apiUrl?: string }) {
     loadConversationList,
     switchConversation,
     deleteConversation,
+    generateDailyReview,
     startDebate,
     exitDebateMode,
     selectCitation,

@@ -11,6 +11,7 @@ from ..conversation import ConversationService
 from ..config import get_settings
 from ..indexer import Database, IndexManager, VectorStore
 from ..qa import QAEngine
+from ..review import ReviewService
 
 
 router = APIRouter(prefix="/api")
@@ -110,6 +111,14 @@ class GenericStatusResponse(BaseModel):
     """通用状态响应。"""
 
     status: str
+
+
+class DailyReviewResponse(BaseModel):
+    """Response returned after generating today's review conversation."""
+
+    conversation_id: str
+    title: str
+    status: Literal["existing", "empty", "ready"]
 
 
 # === Health Check ===
@@ -356,6 +365,22 @@ async def index(request: IndexRequest):
         return IndexResponse(
             status="ok",
             stats=stats,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Daily Review ===
+
+@router.post("/review/daily", response_model=DailyReviewResponse)
+async def generate_daily_review():
+    """Create or reuse today's daily review conversation."""
+    try:
+        result = ReviewService().generate_daily_review()
+        return DailyReviewResponse(
+            conversation_id=result.conversation_id,
+            title=result.title,
+            status=result.status,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

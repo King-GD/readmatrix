@@ -103,6 +103,48 @@ class VectorStore:
     def get_chunk_count(self) -> int:
         """Get total number of chunks"""
         return self.collection.count()
+
+    def get_chunk(self, chunk_id: str) -> Chunk | None:
+        """Get one chunk by its ID."""
+        results = self.collection.get(
+            ids=[chunk_id],
+            include=["documents", "metadatas"],
+        )
+        ids = results.get("ids", [])
+        if not ids:
+            return None
+
+        return Chunk.from_metadata(
+            chunk_id=ids[0],
+            content=(results.get("documents") or [""])[0],
+            metadata=(results.get("metadatas") or [{}])[0],
+        )
+
+    def list_chunks(self, batch_size: int = 200) -> list[Chunk]:
+        """List all chunks in batches."""
+        total = self.get_chunk_count()
+        chunks: list[Chunk] = []
+
+        for offset in range(0, total, batch_size):
+            results = self.collection.get(
+                limit=batch_size,
+                offset=offset,
+                include=["documents", "metadatas"],
+            )
+            ids = results.get("ids", [])
+            documents = results.get("documents", [])
+            metadatas = results.get("metadatas", [])
+
+            for i, chunk_id in enumerate(ids):
+                chunks.append(
+                    Chunk.from_metadata(
+                        chunk_id=chunk_id,
+                        content=documents[i] if i < len(documents) else "",
+                        metadata=metadatas[i] if i < len(metadatas) else {},
+                    )
+                )
+
+        return chunks
     
     def get_all_book_ids(self) -> list[str]:
         """Get all unique book IDs in the store"""
