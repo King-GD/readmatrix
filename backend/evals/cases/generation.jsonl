@@ -1,0 +1,3 @@
+{"id":"generation-001","query":"什么是混合检索？", "expected":{"book_title":["RAG"]}}
+{"id":"generation-002","query":"为什么要做自动化评测？", "expected":{"book_title":["评测"]}}
+{"id":"generation-003","query":"重排模型有什么作用？", "expected":{"book_title":["RAG"]}}

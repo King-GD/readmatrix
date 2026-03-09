@@ -54,6 +54,7 @@ class IndexManager:
         try:
             # Clear existing data
             self.vectorstore.clear()
+            self.db.clear_sparse_chunks()
         except Exception as e:
             print(f"ERROR clearing vectorstore: {e}")
             raise
@@ -142,6 +143,7 @@ class IndexManager:
         # Remove deleted files
         for i, path in enumerate(paths_to_remove):
             self.vectorstore.delete_by_source_path(path)
+            self.db.delete_sparse_chunks_by_source_path(path)
             self.db.delete_file_record(path)
             stats["removed"] += 1
             
@@ -154,6 +156,7 @@ class IndexManager:
             try:
                 # Delete old chunks first
                 self.vectorstore.delete_by_source_path(str(file_path))
+                self.db.delete_sparse_chunks_by_source_path(str(file_path))
                 
                 chunks = self._index_file(file_path, source_type)
                 stats["indexed"] += 1
@@ -200,6 +203,7 @@ class IndexManager:
             
             # Store in vector database
             self.vectorstore.add_chunks(chunks, embeddings)
+            self.db.upsert_sparse_chunks(chunks)
         
         # Update file record
         record = FileRecord(

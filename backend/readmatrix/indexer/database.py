@@ -1,6 +1,7 @@
 """SQLite database for file index state and conversation management"""
 
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import get_settings
-from ..models import FileRecord, ReviewItem
+from ..models import Chunk, FileRecord, ReviewItem
 
 
 CREATE_TABLES_SQL = """
@@ -67,6 +68,16 @@ CREATE TABLE IF NOT EXISTS review_items (
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    chunk_id UNINDEXED,
+    source_path UNINDEXED,
+    book_id UNINDEXED,
+    book_title,
+    title_path,
+    content,
+    tokenize = 'trigram'
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -366,6 +377,127 @@ class Database:
         with self.connection() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM review_items").fetchone()
         return int(row["count"]) if row else 0
+
+    # === Sparse Retrieval ===
+
+    def clear_sparse_chunks(self):
+        """Clear all sparse chunk index rows."""
+        with self.connection() as conn:
+            conn.execute("DELETE FROM chunks_fts")
+
+    def upsert_sparse_chunks(self, chunks: list[Chunk]):
+        """Upsert chunks into the sparse retrieval index."""
+        if not chunks:
+            return
+
+        with self.connection() as conn:
+            conn.executemany(
+                "DELETE FROM chunks_fts WHERE chunk_id = ?",
+                [(chunk.chunk_id,) for chunk in chunks],
+            )
+            conn.executemany(
+                """
+                INSERT INTO chunks_fts (
+                    chunk_id,
+                    source_path,
+                    book_id,
+                    book_title,
+                    title_path,
+                    content
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        chunk.chunk_id,
+                        chunk.source_path,
+                        chunk.book_id,
+                        chunk.book_title,
+                        "|".join(chunk.title_path),
+                        chunk.content,
+                    )
+                    for chunk in chunks
+                ],
+            )
+
+    def delete_sparse_chunks_by_source_path(self, source_path: str):
+        """Delete sparse chunks belonging to one source path."""
+        with self.connection() as conn:
+            conn.execute("DELETE FROM chunks_fts WHERE source_path = ?", (source_path,))
+
+    def search_sparse_chunks(
+        self,
+        query: str,
+        limit: int = 10,
+        book_id: str | None = None,
+        book_title: str | None = None,
+    ) -> list[Chunk]:
+        """Search sparse chunk index via SQLite FTS."""
+        normalized_query = self._build_sparse_match_query(query)
+        if not normalized_query:
+            return []
+
+        where_clauses = ["chunks_fts MATCH ?"]
+        params: list[Any] = [normalized_query]
+
+        if book_id:
+            where_clauses.append("book_id = ?")
+            params.append(book_id)
+        elif book_title:
+            where_clauses.append("book_title LIKE ?")
+            params.append(f"%{book_title}%")
+
+        where_sql = " AND ".join(where_clauses)
+
+        with self.connection() as conn:
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        chunk_id,
+                        source_path,
+                        book_id,
+                        book_title,
+                        title_path,
+                        content,
+                        bm25(chunks_fts) AS rank_score
+                    FROM chunks_fts
+                    WHERE {where_sql}
+                    ORDER BY rank_score ASC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                like_query = f"%{query.strip()}%"
+                fallback_clauses = ["(content LIKE ? OR book_title LIKE ? OR title_path LIKE ?)"]
+                fallback_params: list[Any] = [like_query, like_query, like_query]
+
+                if book_id:
+                    fallback_clauses.append("book_id = ?")
+                    fallback_params.append(book_id)
+                elif book_title:
+                    fallback_clauses.append("book_title LIKE ?")
+                    fallback_params.append(f"%{book_title}%")
+
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        chunk_id,
+                        source_path,
+                        book_id,
+                        book_title,
+                        title_path,
+                        content,
+                        0.0 AS rank_score
+                    FROM chunks_fts
+                    WHERE {' AND '.join(fallback_clauses)}
+                    LIMIT ?
+                    """,
+                    (*fallback_params, limit),
+                ).fetchall()
+
+        return [self._to_sparse_chunk(row) for row in rows]
 
     # === Conversations ===
 
@@ -735,3 +867,27 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    def _to_sparse_chunk(self, row: sqlite3.Row) -> Chunk:
+        """Convert a sparse retrieval row into a chunk."""
+        title_path = str(row["title_path"] or "").split("|")
+        return Chunk(
+            chunk_id=row["chunk_id"],
+            block_id="",
+            content=row["content"],
+            source_path=row["source_path"],
+            title_path=[part for part in title_path if part],
+            book_id=row["book_id"] or "",
+            book_title=row["book_title"] or "",
+            author=None,
+            highlight_time=None,
+            distance=None,
+        )
+
+    def _build_sparse_match_query(self, query: str) -> str:
+        """Normalize user query into a conservative FTS MATCH expression."""
+        parts = [part.strip() for part in re.split(r"\s+", query) if part.strip()]
+        if not parts:
+            return ""
+        quoted_parts = ['"' + part.replace('"', "") + '"' for part in parts]
+        return " ".join(quoted_parts)
