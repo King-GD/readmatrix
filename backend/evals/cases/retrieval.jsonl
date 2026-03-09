@@ -1,0 +1,3 @@
+{"id":"retrieval-001","query":"混合检索", "expected":{"must_include":["混合检索"]}}
+{"id":"retrieval-002","query":"重排模型", "expected":{"must_include":["重排"]}}
+{"id":"retrieval-003","query":"自动化评测", "expected":{"must_include":["评测"]}}

@@ -97,6 +97,26 @@ class Settings(BaseSettings):
     
     # === RAG Configuration ===
     retrieval_top_k: int = Field(default=5, description="Number of chunks to retrieve")
+    retrieval_mode: str = Field(
+        default="dense",
+        description="Retrieval mode: dense | hybrid",
+    )
+    enable_sparse_retrieval: bool = Field(
+        default=True,
+        description="Whether to enable SQLite FTS sparse retrieval in hybrid mode",
+    )
+    dense_top_k: int = Field(
+        default=20,
+        description="Dense recall candidate count before rerank",
+    )
+    sparse_top_k: int = Field(
+        default=20,
+        description="Sparse recall candidate count before fusion",
+    )
+    fusion_top_k: int = Field(
+        default=20,
+        description="Hybrid fused candidate count before rerank",
+    )
     retrieval_max_distance: float | None = Field(
         default=0.4,
         description="向量检索最大距离阈值，越小越严格；为 None 时不做过滤",

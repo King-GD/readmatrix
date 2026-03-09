@@ -12,6 +12,14 @@ class VectorStore:
     """ChromaDB vector store manager"""
     
     COLLECTION_NAME = "readmatrix_chunks"
+    COLLECTION_METADATA = {
+        "hnsw:space": "cosine",
+        # Keep the in-memory brute-force buffer above current dataset size.
+        # This avoids a PersistentHNSW flush path that is unstable on this
+        # Windows dataset around the default batch threshold of 100 vectors.
+        "hnsw:batch_size": 10000,
+        "hnsw:sync_threshold": 10000,
+    }
     
     def __init__(self, persist_path: Path | None = None):
         settings = get_settings()
@@ -27,20 +35,26 @@ class VectorStore:
         )
         self.collection = self.client.get_or_create_collection(
             name=self.COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"}
+            metadata=self.COLLECTION_METADATA,
         )
     
     def add_chunks(self, chunks: list[Chunk], embeddings: list[list[float]]):
-        """Add chunks with their embeddings to the store"""
+        """Add chunks with their embeddings to the store.
+
+        Chroma's persisted HNSW path has shown instability with larger mixed-size
+        upsert batches on this dataset, while single-item writes remain stable.
+        Use conservative one-by-one upserts to prioritize index correctness.
+        """
         if not chunks:
             return
-        
-        self.collection.upsert(
-            ids=[c.chunk_id for c in chunks],
-            documents=[c.content for c in chunks],
-            embeddings=embeddings,
-            metadatas=[c.to_metadata() for c in chunks],
-        )
+
+        for chunk, embedding in zip(chunks, embeddings, strict=True):
+            self.collection.upsert(
+                ids=[chunk.chunk_id],
+                documents=[chunk.content],
+                embeddings=[embedding],
+                metadatas=[chunk.to_metadata()],
+            )
     
     def delete_by_source_path(self, source_path: str):
         """Delete all chunks from a specific source file"""
@@ -175,7 +189,7 @@ class VectorStore:
         self.client.delete_collection(self.COLLECTION_NAME)
         self.collection = self.client.get_or_create_collection(
             name=self.COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"}
+            metadata=self.COLLECTION_METADATA,
         )
 
     def get_by_source(self, source_path: str, limit: int = 50) -> list[Chunk]:

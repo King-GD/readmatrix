@@ -68,6 +68,7 @@ htmlcov/
 eval_cases.jsonl
 frontend/test-results/
 frontend/playwright-report/
+backend/evals/reports/*.json
 
 # ===== Data & Storage =====
 backend/data/
