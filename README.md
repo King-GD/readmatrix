@@ -33,15 +33,13 @@ ReadMatrix 是一个围绕“读书笔记 -> 可追溯问答”设计的本地�
 
 ## 界面截图
 
-> 以下为截图区模板。你可以把实际截图上传到仓库（例如 `assets/screenshots/`）后替换链接。
-
 | 首页对话 | 引用面板 |
 |---|---|
-| ![Chat Page Placeholder](https://placehold.co/1200x720?text=ReadMatrix+Chat) | ![Citation Panel Placeholder](https://placehold.co/1200x720?text=Citation+Panel) |
+| ![ReadMatrix Chat Page](assets/screenshots/chat-page.png) | ![ReadMatrix Citation Panel](assets/screenshots/citation-panel.png) |
 
 | 健康检查 | 索引任务 |
 |---|---|
-| ![Doctor Placeholder](https://placehold.co/1200x720?text=Doctor) | ![Indexer Placeholder](https://placehold.co/1200x720?text=Indexer) |
+| ![ReadMatrix Doctor API](assets/screenshots/doctor.png) | ![ReadMatrix Index API](assets/screenshots/indexer.png) |
 
 ## 技术栈
 
