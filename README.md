@@ -37,9 +37,9 @@ ReadMatrix 是一个围绕“读书笔记 -> 可追溯问答”设计的本地�
 |---|---|
 | ![ReadMatrix Chat Page](assets/screenshots/chat-page.png) | ![ReadMatrix Citation Panel](assets/screenshots/citation-panel.png) |
 
-| 健康检查 | 索引任务 |
+| 今日回顾 | 辩论模式 |
 |---|---|
-| ![ReadMatrix Doctor API](assets/screenshots/doctor.png) | ![ReadMatrix Index API](assets/screenshots/indexer.png) |
+| ![ReadMatrix Daily Review](assets/screenshots/daily-review.png) | ![ReadMatrix Debate Mode](assets/screenshots/debate-mode.png) |
 
 ## 技术栈
 
